@@ -1,27 +1,18 @@
 import scratchattach as sa
 import os
+import requests, subprocess, numpy as np, threading
 from dotenv import load_dotenv
-import requests, threading, time
-import numpy as np
-from pydub import AudioSegment
-import io
-from pydub.utils import which
-
-os.environ["PATH"] = os.environ["PATH"] + f":{os.path.expanduser('~/mybin')}"
 
 load_dotenv()
 
 SESSION_ID = os.getenv("SESSION_ID")
 PROJECT_ID = os.getenv("PROJECT_ID")
 
-AudioSegment.converter = which("ffmpeg")
-AudioSegment.ffprobe   = which("ffprobe")
-
-print("ffmpeg:", AudioSegment.converter)
-print("ffprobe:", AudioSegment.ffprobe)
-
-if SESSION_ID is None or PROJECT_ID is None:
-    raise ValueError("SESSION_ID and PROJECT_ID must be set in the environment variables.")
+if PROJECT_ID is None or SESSION_ID is None:
+    print(".env should contain PROJECT_ID and SESSION_ID!")
+    exit(1)
+else:
+    print(".env contains everything!")
 
 session = sa.login_by_id(session_id=SESSION_ID, username="superjolt")
 cloud = session.connect_cloud(PROJECT_ID)
@@ -36,7 +27,7 @@ streaming = False
 
 @client.event
 def on_ready():
-    print("Request handlers work")
+    print("Request handler ready!")
 
 @client.request
 def ping():
@@ -44,56 +35,54 @@ def ping():
     return "pong"
 
 @client.request
-def connect_radio(station, username):
-    global connectedStation, streaming
-    if station not in radioStations:
-        return "Station not found!"
-    connectedStation = station
-    if not streaming:
-        threading.Thread(target=stream_and_analyze, daemon=True).start()
-        streaming = True
-    return f"{username} connected to {station}!"
-
-
-def chunk_to_frequency(chunk):
-    try:
-        # Wrap chunk in BytesIO and decode as MP3
-        audio_segment = AudioSegment.from_file(io.BytesIO(chunk), format="mp3")
-        samples = np.array(audio_segment.get_array_of_samples())
-
-        if len(samples) < 2:
-            return 0
-
-        fft = np.fft.fft(samples)
-        freqs = np.fft.fftfreq(len(fft), 1 / audio_segment.frame_rate)
-        idx = np.argmax(np.abs(fft[:len(fft)//2]))
-        freq = abs(freqs[idx])
-        return freq
-    except Exception as e:
-        print("Decode error:", e)
-        return 0
+def get_stations():
+    return list(radioStations.keys())
 
 def freq_to_midi(freq):
     if freq <= 0:
         return 0
     midi = int(69 + 12 * np.log2(freq / 440))
-    return max(30, min(midi, 90))  # limit range
+    return max(30, min(midi, 90))
 
-def stream_and_analyze():
-    global connectedStation
+def stream_station(name, url):
+    print(f"[▶️] Starting stream for {name}")
+    process = subprocess.Popen([
+        "ffmpeg",
+        "-i", url,
+        "-f", "s16le",
+        "-acodec", "pcm_s16le",
+        "-ac", "1",
+        "-ar", "44100",
+        "-"
+    ], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+
     while True:
-        if connectedStation:
-            url = radioStations[connectedStation]
-            print(f"streaming {connectedStation}")
-            response = requests.get(url, stream=True)
-            for chunk in response.iter_content(chunk_size=1024):
-                if connectedStation is None:
-                    break
-                if chunk:
-                    freq = chunk_to_frequency(chunk)
-                    midi = freq_to_midi(freq)
-                    print(f"freq: {freq:.2f} hz -> MIDI {midi}")
-                    client.send(midi)  # send raw int, no hex
-                time.sleep(0.05)
+        raw = process.stdout.read(8192)
+        if not raw:
+            break
+
+        pcm = np.frombuffer(raw, np.int16)
+        if len(pcm) == 0:
+            continue
+
+        fft = np.fft.fft(pcm)
+        freqs = np.fft.fftfreq(len(fft), 1 / 44100)
+
+        mag = np.abs(fft[:len(fft)//2])
+        pos_freqs = np.abs(freqs[:len(fft)//2])
+
+        top_idxs = np.argpartition(mag, -MAX_NOTES)[-MAX_NOTES:]
+        top_freqs = pos_freqs[top_idxs]
+
+        midi_notes = sorted({freq_to_midi(f) for f in top_freqs if f > 20 and f < 10000})
+        midi_notes = midi_notes[:MAX_NOTES]
+
+        command = ",".join(map(str, midi_notes))
+        # Send to a unique cloud var per station:
+        client.set_var(f"{name}_data", command)
+
+# Start a stream thread for each station:
+for station_name, station_url in radioStations.items():
+    threading.Thread(target=stream_station, args=(station_name, station_url), daemon=True).start()
 
 client.start(thread=True)
