@@ -1,6 +1,7 @@
 import scratchattach as sa
 import os
 import requests, subprocess, numpy as np, threading
+from flask import Flask
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -27,12 +28,23 @@ streaming = False
 
 @client.event
 def on_ready():
-    print("Request handler ready!")
+    print("[✅] Ready")
 
 @client.request
 def ping():
     print("pong!")
     return "pong"
+
+@client.request
+def connect_radio(station, username):
+    global connectedStation, streaming
+    if station not in radioStations:
+        return "Station not found"
+    connectedStation = station
+    if not streaming:
+        threading.Thread(target=stream_and_analyze, daemon=True).start()
+        streaming = True
+    return f"{username} connected to {station}"
 
 @client.request
 def get_stations():
@@ -44,45 +56,52 @@ def freq_to_midi(freq):
     midi = int(69 + 12 * np.log2(freq / 440))
     return max(30, min(midi, 90))
 
-def stream_station(name, url):
-    print(f"[▶️] Starting stream for {name}")
-    process = subprocess.Popen([
-        "ffmpeg",
-        "-i", url,
-        "-f", "s16le",
-        "-acodec", "pcm_s16le",
-        "-ac", "1",
-        "-ar", "44100",
-        "-"
-    ], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-
+def stream_and_analyze():
+    global connectedStation
     while True:
-        raw = process.stdout.read(8192)
-        if not raw:
-            break
+        if connectedStation:
+            url = radioStations[connectedStation]
+            print(f"[▶️] Streaming: {connectedStation}")
 
-        pcm = np.frombuffer(raw, np.int16)
-        if len(pcm) == 0:
-            continue
+            # Start ffmpeg process: decode stream to raw PCM
+            process = subprocess.Popen([
+                "ffmpeg",
+                "-i", url,
+                "-f", "s16le",  # raw PCM 16-bit little endian
+                "-acodec", "pcm_s16le",
+                "-ac", "1",     # mono
+                "-ar", "44100", # sample rate
+                "-"
+            ], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
 
-        fft = np.fft.fft(pcm)
-        freqs = np.fft.fftfreq(len(fft), 1 / 44100)
+            while True:
+                # Read small PCM chunk
+                raw = process.stdout.read(4096)
+                if not raw:
+                    break
 
-        mag = np.abs(fft[:len(fft)//2])
-        pos_freqs = np.abs(freqs[:len(fft)//2])
+                # Convert bytes to numpy int16 samples
+                pcm = np.frombuffer(raw, np.int16)
+                if len(pcm) == 0:
+                    continue
 
-        top_idxs = np.argpartition(mag, -MAX_NOTES)[-MAX_NOTES:]
-        top_freqs = pos_freqs[top_idxs]
+                # FFT
+                fft = np.fft.fft(pcm)
+                freqs = np.fft.fftfreq(len(fft), 1 / 44100)
+                idx = np.argmax(np.abs(fft[:len(fft)//2]))
+                freq = abs(freqs[idx])
 
-        midi_notes = sorted({freq_to_midi(f) for f in top_freqs if f > 20 and f < 10000})
-        midi_notes = midi_notes[:MAX_NOTES]
+                midi = freq_to_midi(freq)
+                print(f"Freq: {freq:.2f} Hz -> MIDI {midi}")
+                client.send(midi)
 
-        command = ",".join(map(str, midi_notes))
-        # Send to a unique cloud var per station:
-        client.set_var(f"{name}_data", command)
+app = Flask(__name__)
 
-# Start a stream thread for each station:
-for station_name, station_url in radioStations.items():
-    threading.Thread(target=stream_station, args=(station_name, station_url), daemon=True).start()
+@app.route("/")
+def home():
+    return "RadioStreamer is running!"
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
 
 client.start(thread=True)
