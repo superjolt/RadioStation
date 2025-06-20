@@ -98,7 +98,9 @@ app = Flask(__name__)
 def home():
     return "RadioStation is RUNNING!"
 
-if __name__ == "__main__":
+def run_flask():
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
 
-client.start(thread=True)
+threading.Thread(target=run_flask, daemon=True).start()
+
+client.start()
