@@ -28,7 +28,7 @@ streaming = False
 
 @client.event
 def on_ready():
-    print("[✅] Ready")
+    print("Request handlers work")
 
 @client.request
 def ping():
@@ -39,7 +39,7 @@ def ping():
 def connect_radio(station, username):
     global connectedStation, streaming
     if station not in radioStations:
-        return "Station not found"
+        return f"Station {station} not found"
     connectedStation = station
     if not streaming:
         threading.Thread(target=stream_and_analyze, daemon=True).start()
@@ -61,7 +61,7 @@ def stream_and_analyze():
     while True:
         if connectedStation:
             url = radioStations[connectedStation]
-            print(f"[▶️] Streaming: {connectedStation}")
+            print(f"streaming: {connectedStation}")
 
             # Start ffmpeg process: decode stream to raw PCM
             process = subprocess.Popen([
@@ -75,17 +75,14 @@ def stream_and_analyze():
             ], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
 
             while True:
-                # Read small PCM chunk
                 raw = process.stdout.read(4096)
                 if not raw:
                     break
 
-                # Convert bytes to numpy int16 samples
                 pcm = np.frombuffer(raw, np.int16)
                 if len(pcm) == 0:
                     continue
 
-                # FFT
                 fft = np.fft.fft(pcm)
                 freqs = np.fft.fftfreq(len(fft), 1 / 44100)
                 idx = np.argmax(np.abs(fft[:len(fft)//2]))
@@ -99,7 +96,7 @@ app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "RadioStreamer is running!"
+    return "RadioStation is RUNNING!"
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
